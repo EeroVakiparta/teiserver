@@ -1,0 +1,450 @@
+From 6f010ce5fc77803a29d5441a997f837ace5058d9 Mon Sep 17 00:00:00 2001
+From: EeroVakiparta <eero_vakiparta@hotmail.com>
+Date: Sun, 30 Mar 2025 19:48:43 +0300
+Subject: [PATCH] Add team totals to match results display
+
+This commit adds the calculation and display of team totals in match results:
+
+1. Implement `calculate_team_totals` to compute combined stats for each team
+2. Add `should_show_team_total?` to determine when to display team totals
+3. Update match template to show team totals at the end of each team section
+4. Add tests for different game configurations
+
+Features:
+- Shows combined team stats (damage, metal, energy) for teams
+- Optimized to skip calculations for single-player teams
+- Displays totals only after the last player in each multi-player team
+- Handles all game types appropriately (team games, duels, free-for-all)
+
+Tests cover team games (2v2), uneven teams (2v1), duels (1v1),
+and free-for-all games (1v1v1).
+---
+ lib/teiserver/mix_tasks/fake_data.ex          |  18 +-
+ lib/teiserver_web/live/battles/match/show.ex  |  62 ++++++
+ .../live/battles/match/show.html.heex         |  27 ++-
+ .../battle/match/tab_players.html.heex        |  16 +-
+ .../live/battles/match/show_live_test.exs     | 206 +++++++++++++++++-
+ 5 files changed, 312 insertions(+), 17 deletions(-)
+
+diff --git a/lib/teiserver/mix_tasks/fake_data.ex b/lib/teiserver/mix_tasks/fake_data.ex
+index ac7d3d081..bcdd6a9b5 100644
+--- a/lib/teiserver/mix_tasks/fake_data.ex
++++ b/lib/teiserver/mix_tasks/fake_data.ex
+@@ -376,7 +376,14 @@ defmodule Mix.Tasks.Teiserver.Fakedata do
+             %{
+               team_id: 0,
+               win: match.winning_team == 0,
+-              stats: %{},
++              stats: %{
++                "damage_done" => :rand.uniform(1000) * 10,
++                "damage_taken" => :rand.uniform(1000) * 10,
++                "metal_produced" => :rand.uniform(1000) * 100,
++                "metal_used" => :rand.uniform(1000) * 100,
++                "energy_produced" => :rand.uniform(1000) * 1000,
++                "energy_used" => :rand.uniform(1000) * 1000
++              },
+               party_id: get_party_id(num_players),
+               user_id: userid,
+               match_id: match.id
+@@ -389,7 +396,14 @@ defmodule Mix.Tasks.Teiserver.Fakedata do
+             %{
+               team_id: 1,
+               win: match.winning_team == 1,
+-              stats: %{},
++              stats: %{
++                "damage_done" => :rand.uniform(1000) * 10,
++                "damage_taken" => :rand.uniform(1000) * 10,
++                "metal_produced" => :rand.uniform(1000) * 100,
++                "metal_used" => :rand.uniform(1000) * 100,
++                "energy_produced" => :rand.uniform(1000) * 1000,
++                "energy_used" => :rand.uniform(1000) * 1000
++              },
+               party_id: get_party_id(num_players),
+               user_id: userid,
+               match_id: match.id
+diff --git a/lib/teiserver_web/live/battles/match/show.ex b/lib/teiserver_web/live/battles/match/show.ex
+index 496df1540..38da2cd1b 100644
+--- a/lib/teiserver_web/live/battles/match/show.ex
++++ b/lib/teiserver_web/live/battles/match/show.ex
+@@ -112,6 +112,8 @@ defmodule TeiserverWeb.Battle.MatchLive.Show do
+         )
+         |> Enum.sort_by(fn m -> m.team_id end, &<=/2)
+ 
++      team_totals = calculate_team_totals(members)
++
+       find_current_user =
+         Enum.find(members, fn x ->
+           x.user_id == current_user.id
+@@ -245,6 +247,7 @@ defmodule TeiserverWeb.Battle.MatchLive.Show do
+       |> assign(:match, match)
+       |> assign(:match_name, match_name)
+       |> assign(:members, members)
++      |> assign(:team_totals, team_totals)
+       |> assign(:balanced_members, balanced_members)
+       |> assign(:rating_logs, rating_logs)
+       |> assign(:parties, parties)
+@@ -652,4 +655,63 @@ defmodule TeiserverWeb.Battle.MatchLive.Show do
+     </div>
+     """
+   end
++
++  @doc """
++  Calculates team totals for each team based on member stats.
++  Only calculates totals for teams with more than one player.
++  """
++  def calculate_team_totals(members) do
++    members
++    |> Enum.group_by(& &1.team_id)
++    |> Map.new(fn {team_id, team_members} ->
++      if length(team_members) <= 1 do
++        {team_id, nil}
++      else
++        stats =
++          Enum.reduce(
++            team_members,
++            %{
++              "damage_done" => 0,
++              "damage_taken" => 0,
++              "metal_produced" => 0,
++              "metal_used" => 0,
++              "energy_produced" => 0,
++              "energy_used" => 0
++            },
++            fn member, acc ->
++              %{
++                "damage_done" => acc["damage_done"] + (member.stats["damage_done"] || 0),
++                "damage_taken" => acc["damage_taken"] + (member.stats["damage_taken"] || 0),
++                "metal_produced" => acc["metal_produced"] + (member.stats["metal_produced"] || 0),
++                "metal_used" => acc["metal_used"] + (member.stats["metal_used"] || 0),
++                "energy_produced" => acc["energy_produced"] + (member.stats["energy_produced"] || 0),
++                "energy_used" => acc["energy_used"] + (member.stats["energy_used"] || 0)
++              }
++            end
++          )
++
++        {team_id,
++         %{
++           players: Enum.count(team_members),
++           stats: stats
++         }}
++      end
++    end)
++    |> Map.reject(fn {_team_id, value} -> is_nil(value) end)
++  end
++
++  @doc """
++  Determines if team totals should be shown.
++  Totals are only shown under the last player in teams with multiple players.
++  """
++  def should_show_team_total?(members, member) do
++    team_members = Enum.filter(members, &(&1.team_id == member.team_id))
++
++    if length(team_members) <= 1 do
++      false
++    else
++      last_member = List.last(team_members)
++      member.user_id == last_member.user_id
++    end
++  end
+ end
+diff --git a/lib/teiserver_web/live/battles/match/show.html.heex b/lib/teiserver_web/live/battles/match/show.html.heex
+index 1f6fdd941..f6037dccf 100644
+--- a/lib/teiserver_web/live/battles/match/show.html.heex
++++ b/lib/teiserver_web/live/battles/match/show.html.heex
+@@ -232,14 +232,14 @@
+                   <% end %>
+                 </td>
+ 
+-                <td>{normalize(m.stats["damageDealt"])}</td>
+-                <td>{normalize(m.stats["damageReceived"])}</td>
++                <td>{normalize(m.stats["damage_done"])}</td>
++                <td>{normalize(m.stats["damage_taken"])}</td>
+ 
+-                <td>{normalize(m.stats["metalProduced"])}</td>
+-                <td>{normalize(m.stats["metalUsed"])}</td>
++                <td>{normalize(m.stats["metal_produced"])}</td>
++                <td>{normalize(m.stats["metal_used"])}</td>
+ 
+-                <td>{normalize(m.stats["energyProduced"])}</td>
+-                <td>{normalize(m.stats["energyUsed"])}</td>
++                <td>{normalize(m.stats["energy_produced"])}</td>
++                <td>{normalize(m.stats["energy_used"])}</td>
+ 
+                 <td>
+                   <div :if={m.user_id != @current_user.id} style="display: flex;">
+@@ -271,6 +271,21 @@
+                   </div>
+                 </td>
+               </tr>
++
++              <%= if should_show_team_total?(@members, m) do %>
++                <% team_totals = @team_totals[m.team_id] %>
++                <tr style="background-color: rgba(0,0,0,0.05);">
++                  <td colspan="4"><strong>Team {m.team_id + 1} Totals ({team_totals.players} players)</strong></td>
++                  <td colspan="4">&nbsp;</td>
++                  <td><strong>{normalize(team_totals.stats["damage_done"])}</strong></td>
++                  <td><strong>{normalize(team_totals.stats["damage_taken"])}</strong></td>
++                  <td><strong>{normalize(team_totals.stats["metal_produced"])}</strong></td>
++                  <td><strong>{normalize(team_totals.stats["metal_used"])}</strong></td>
++                  <td><strong>{normalize(team_totals.stats["energy_produced"])}</strong></td>
++                  <td><strong>{normalize(team_totals.stats["energy_used"])}</strong></td>
++                  <td>&nbsp;</td>
++                </tr>
++              <% end %>
+             <% end %>
+           </tbody>
+         </table>
+diff --git a/lib/teiserver_web/templates/battle/match/tab_players.html.heex b/lib/teiserver_web/templates/battle/match/tab_players.html.heex
+index 7b3e05288..6bb0369a5 100644
+--- a/lib/teiserver_web/templates/battle/match/tab_players.html.heex
++++ b/lib/teiserver_web/templates/battle/match/tab_players.html.heex
+@@ -53,17 +53,17 @@
+ 
+         <td>{m.team_id + 1}</td>
+ 
+-        <td>{normalize(m.stats["damageDealt"])}</td>
+-        <td>{normalize(m.stats["damageReceived"])}</td>
++        <td>{normalize(m.stats["damage_done"])}</td>
++        <td>{normalize(m.stats["damage_taken"])}</td>
+ 
+-        <td>{normalize(m.stats["unitsKilled"])}</td>
+-        <td>{normalize(m.stats["unitsProduced"])}</td>
++        <td>{normalize(m.stats["units_killed"])}</td>
++        <td>{normalize(m.stats["units_produced"])}</td>
+ 
+-        <td>{normalize(m.stats["metalProduced"])}</td>
+-        <td>{normalize(m.stats["metalUsed"])}</td>
++        <td>{normalize(m.stats["metal_produced"])}</td>
++        <td>{normalize(m.stats["metal_used"])}</td>
+ 
+-        <td>{normalize(m.stats["energyProduced"])}</td>
+-        <td>{normalize(m.stats["energyUsed"])}</td>
++        <td>{normalize(m.stats["energy_produced"])}</td>
++        <td>{normalize(m.stats["energy_used"])}</td>
+ 
+         <td>{if rating, do: rating.value["rating_value"] |> round(2)}</td>
+ 
+diff --git a/test/teiserver_web/live/battles/match/show_live_test.exs b/test/teiserver_web/live/battles/match/show_live_test.exs
+index 8992ce4a4..d54e70866 100644
+--- a/test/teiserver_web/live/battles/match/show_live_test.exs
++++ b/test/teiserver_web/live/battles/match/show_live_test.exs
+@@ -1,6 +1,88 @@
+ defmodule TeiserverWeb.Battle.MatchLive.ShowTest do
+   alias TeiserverWeb.Battle.MatchLive.Show
+-  use ExUnit.Case
++  use Teiserver.DataCase, async: true
++
++  @player_stats %{
++    team1_player1: %{
++      "damage_done" => 100,
++      "damage_taken" => 50,
++      "metal_produced" => 200,
++      "metal_used" => 150,
++      "energy_produced" => 300,
++      "energy_used" => 250
++    },
++    team1_player2: %{
++      "damage_done" => 200,
++      "damage_taken" => 100,
++      "metal_produced" => 300,
++      "metal_used" => 250,
++      "energy_produced" => 400,
++      "energy_used" => 350
++    },
++    team2_player1: %{
++      "damage_done" => 150,
++      "damage_taken" => 75,
++      "metal_produced" => 250,
++      "metal_used" => 200,
++      "energy_produced" => 350,
++      "energy_used" => 300
++    },
++    team2_player2: %{
++      "damage_done" => 250,
++      "damage_taken" => 125,
++      "metal_produced" => 350,
++      "metal_used" => 300,
++      "energy_produced" => 450,
++      "energy_used" => 400
++    }
++  }
++
++  # Expected team total stat values for tests
++  @team_totals %{
++    empty_team: %{
++      players: 2,
++      damage_done: 0,
++      damage_taken: 0,
++      metal_produced: 0,
++      metal_used: 0,
++      energy_produced: 0,
++      energy_used: 0
++    },
++    team1: %{
++      players: 2,
++      damage_done: 300,
++      damage_taken: 150,
++      metal_produced: 500,
++      metal_used: 400,
++      energy_produced: 700,
++      energy_used: 600
++    },
++    team2: %{
++      players: 2,
++      damage_done: 400,
++      damage_taken: 200,
++      metal_produced: 600,
++      metal_used: 500,
++      energy_produced: 800,
++      energy_used: 700
++    }
++  }
++
++  defp player_stats(player_key), do: @player_stats[player_key]
++
++  defp make_player(user_id, team_id, stats \\ %{}) do
++    %{team_id: team_id, user_id: user_id, stats: stats}
++  end
++
++  defp assert_team_totals(totals, team_id, expected) do
++    assert totals[team_id].players == expected.players
++    assert totals[team_id].stats["damage_done"] == expected.damage_done
++    assert totals[team_id].stats["damage_taken"] == expected.damage_taken
++    assert totals[team_id].stats["metal_produced"] == expected.metal_produced
++    assert totals[team_id].stats["metal_used"] == expected.metal_used
++    assert totals[team_id].stats["energy_produced"] == expected.energy_produced
++    assert totals[team_id].stats["energy_used"] == expected.energy_used
++  end
+ 
+   test "get team id" do
+     team_players = %{1 => [1, 4], 2 => [2, 3]}
+@@ -12,4 +94,126 @@ defmodule TeiserverWeb.Battle.MatchLive.ShowTest do
+     result = Show.get_team_id(player_id, team_players)
+     assert result == 1
+   end
++
++  describe "should_show_team_total?/2" do
++    test "duel matches never show team totals" do
++      members = [
++        make_player(1, 0),
++        make_player(2, 1)
++      ]
++
++      refute Show.should_show_team_total?(members, hd(members))
++      refute Show.should_show_team_total?(members, List.last(members))
++    end
++
++    test "shows team total stats after last player in each team in team games" do
++      members = [
++        make_player(1, 0),
++        make_player(2, 0),
++        make_player(3, 1),
++        make_player(4, 1)
++      ]
++
++      refute Show.should_show_team_total?(members, Enum.at(members, 0))
++      assert Show.should_show_team_total?(members, Enum.at(members, 1))
++      refute Show.should_show_team_total?(members, Enum.at(members, 2))
++      assert Show.should_show_team_total?(members, Enum.at(members, 3))
++    end
++
++    test "shows team totals for uneven teams (2v1)" do
++      members = [
++        make_player(1, 0),
++        make_player(2, 0),
++        make_player(3, 1)
++      ]
++
++      refute Show.should_show_team_total?(members, Enum.at(members, 0))
++      assert Show.should_show_team_total?(members, Enum.at(members, 1))
++      # Teams with only one player should not show team stat totals
++      refute Show.should_show_team_total?(members, Enum.at(members, 2))
++    end
++
++    test "never shows team totals in free-for-all games (1v1v1)" do
++      members = [
++        make_player(1, 0),
++        make_player(2, 1),
++        make_player(3, 2)
++      ]
++
++      refute Show.should_show_team_total?(members, Enum.at(members, 0))
++      refute Show.should_show_team_total?(members, Enum.at(members, 1))
++      refute Show.should_show_team_total?(members, Enum.at(members, 2))
++    end
++  end
++
++  describe "calculate_team_totals/1" do
++    test "handles empty stats" do
++      members = [
++        make_player(1, 0, %{}),
++        make_player(2, 0, %{}),
++        make_player(3, 1, %{}),
++        make_player(4, 1, %{})
++      ]
++
++      totals = Show.calculate_team_totals(members)
++
++      assert_team_totals(totals, 0, @team_totals.empty_team)
++      assert_team_totals(totals, 1, @team_totals.empty_team)
++    end
++
++    test "calculates totals for 2v2 teams" do
++      members = [
++        make_player(1, 0, player_stats(:team1_player1)),
++        make_player(2, 0, player_stats(:team1_player2)),
++        make_player(3, 1, player_stats(:team2_player1)),
++        make_player(4, 1, player_stats(:team2_player2))
++      ]
++
++      totals = Show.calculate_team_totals(members)
++
++      assert_team_totals(totals, 0, @team_totals.team1)
++      assert_team_totals(totals, 1, @team_totals.team2)
++    end
++
++    test "calculates totals for uneven teams (2v1)" do
++      members = [
++        make_player(1, 0, player_stats(:team1_player1)),
++        make_player(2, 0, player_stats(:team1_player2)),
++        make_player(3, 1, player_stats(:team2_player1))
++      ]
++
++      totals = Show.calculate_team_totals(members)
++
++      # Team 0 has multiple players, so should have total stats
++      assert_team_totals(totals, 0, @team_totals.team1)
++
++      # Team 1 has only one player, so should not have total stats
++      refute Map.has_key?(totals, 1)
++    end
++
++    test "skips totals for teams with only one player" do
++      members = [
++        make_player(1, 0, player_stats(:team1_player1)),
++        make_player(2, 1, player_stats(:team2_player1))
++      ]
++
++      totals = Show.calculate_team_totals(members)
++
++      # Both teams have only one player, so no total stats should be calculated
++      assert totals == %{}
++    end
++
++    test "skips totals for free-for-all games (1v1v1)" do
++      members = [
++        make_player(1, 0, player_stats(:team1_player1)),
++        make_player(2, 1, player_stats(:team1_player2)),
++        make_player(3, 2, player_stats(:team2_player1))
++      ]
++
++      totals = Show.calculate_team_totals(members)
++
++      # Free-for-all games have no team total stats since each player is their own team
++      assert totals == %{}
++    end
++  end
+ end
+-- 
+2.39.5 (Apple Git-154)
+
